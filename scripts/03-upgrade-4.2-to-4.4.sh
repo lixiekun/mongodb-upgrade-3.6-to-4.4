@@ -1,0 +1,95 @@
+#!/bin/bash
+# MongoDB Upgrade Step 3: 4.2.24 → 4.4.30
+# Offline installation using local .deb packages
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PKG_DIR="${PROJECT_DIR}/packages/4.4"
+
+# Verify packages exist
+if [ ! -d "${PKG_DIR}" ] || [ -z "$(ls -A ${PKG_DIR}/*.deb 2>/dev/null)" ]; then
+    error "No .deb packages found in ${PKG_DIR}. Run download-packages.sh first."
+fi
+
+echo "============================================="
+echo " MongoDB Upgrade: 4.2.24 → 4.4.30"
+echo "============================================="
+echo ""
+
+# Step 1: Verify prerequisites
+info "Step 1: Verifying prerequisites..."
+
+FCV=$(mongo --quiet --eval 'db.adminCommand({ getParameter: 1, featureCompatibilityVersion: 1 }).version' 2>/dev/null || echo "unknown")
+if [ "$FCV" != "4.2" ]; then
+    error "featureCompatibilityVersion is '${FCV}', expected '4.2'. Complete step 2 first."
+fi
+info "  featureCompatibilityVersion: 4.2 ✓"
+
+VERSION=$(mongod --version 2>/dev/null | head -1 || echo "unknown")
+info "  Current version: ${VERSION}"
+
+# Step 2: Stop MongoDB
+info "Step 2: Stopping MongoDB..."
+sudo systemctl stop mongod
+info "  MongoDB stopped ✓"
+
+# Step 3: Install 4.4.30 packages
+info "Step 3: Installing MongoDB 4.4.30 packages..."
+for deb in "${PKG_DIR}"/*.deb; do
+    info "  Installing $(basename $deb)..."
+    sudo dpkg -i "$deb"
+done
+info "  Packages installed ✓"
+
+# Step 4: Start MongoDB
+info "Step 4: Starting MongoDB 4.4.30..."
+sudo systemctl start mongod
+sleep 5
+
+if ! pgrep -x mongod &>/dev/null; then
+    error "mongod failed to start! Check logs: sudo journalctl -u mongod"
+fi
+info "  MongoDB 4.4.30 started ✓"
+
+# Step 5: Verify version
+info "Step 5: Verifying version..."
+NEW_VERSION=$(mongo --quiet --eval 'db.version()' 2>/dev/null || echo "unknown")
+info "  MongoDB version: ${NEW_VERSION}"
+
+if ! echo "$NEW_VERSION" | grep -q "4.4"; then
+    error "Expected version 4.4.x, got ${NEW_VERSION}"
+fi
+
+# Step 6: Set feature compatibility version
+echo ""
+warn "About to set featureCompatibilityVersion to 4.4"
+warn "This is the FINAL step. Downgrade will be very difficult after this."
+read -p "Set featureCompatibilityVersion to 4.4? [y/N] " -n 1 -r
+echo ""
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    info "Setting featureCompatibilityVersion to 4.4..."
+    mongo --eval 'db.adminCommand({ setFeatureCompatibilityVersion: "4.4" })'
+    info "  featureCompatibilityVersion set to 4.4 ✓"
+else
+    warn "Skipped setting featureCompatibilityVersion. Run manually when ready:"
+    warn "  mongo --eval 'db.adminCommand({ setFeatureCompatibilityVersion: \"4.4\" })'"
+fi
+
+echo ""
+info "============================================="
+info " Upgrade Complete: 3.6.8 → 4.4.30"
+info "============================================="
+echo ""
+info "Run scripts/04-post-check.sh to verify the final state."
